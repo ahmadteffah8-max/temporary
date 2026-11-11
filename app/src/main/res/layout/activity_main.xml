@@ -28,7 +28,7 @@
             android:textStyle="bold" />
 
         <TextView
-            android:id="@+id/tvShizuku"
+            android:id="@+id/tvAccess"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
@@ -36,26 +36,11 @@
             android:textColor="#B0B0B0"
             android:textSize="14sp" />
 
-        <LinearLayout
-            android:id="@+id/rowShizukuButtons"
+        <Button
+            android:id="@+id/btnAccess"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btnPermission"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="منح الصلاحية" />
-
-            <Button
-                android:id="@+id/btnOpenShizuku"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="افتح Shizuku" />
-        </LinearLayout>
+            android:text="افتح إعدادات إمكانية الوصول" />
 
         <TextView
             android:layout_width="match_parent"

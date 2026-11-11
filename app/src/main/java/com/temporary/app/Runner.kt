@@ -1,53 +1,53 @@
 package com.temporary.app
 
 import android.content.Context
-import android.content.Intent
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Runs the switch-off work. Used by the alarm receiver, the keep-alive service and the test button. */
+/** Glue between the alarm / test button and the accessibility service. */
 object Runner {
 
     private val lock = Any()
 
-    /**
-     * Called when the timer is due. Only the first caller does the work
-     * (both the alarm and the service may call this), later calls do nothing.
-     */
-    fun runDue(ctx: Context): Boolean {
+    /** Only the first caller gets true for a given timer. */
+    fun claim(ctx: Context): Boolean {
         val prefs = Scheduler.prefs(ctx)
         synchronized(lock) {
             if (prefs.getLong("target", 0L) <= 0L) return false
             prefs.edit().putLong("target", 0L).commit()
+            return true
         }
-        applyNow(
-            ctx,
-            prefs.getBoolean("wifi", false),
-            prefs.getBoolean("data", false),
-            prefs.getBoolean("bt", false),
-            waitForShizuku = true
-        )
-        ctx.stopService(Intent(ctx, TimerService::class.java))
-        return true
     }
 
-    fun applyNow(
-        ctx: Context,
-        wifi: Boolean,
-        data: Boolean,
-        bt: Boolean,
-        waitForShizuku: Boolean
-    ): String {
-        // If the process was just started by the alarm, give Shizuku a moment to connect.
-        if (waitForShizuku) {
-            var tries = 0
-            while (!Switcher.binderAlive() && tries < 20) {
-                Thread.sleep(200)
-                tries++
-            }
+    /** After a cold start by the alarm the system needs a moment to connect the accessibility service. */
+    fun waitForService(maxMs: Long = 5000L): ToggleService? {
+        val end = System.currentTimeMillis() + maxMs
+        var svc = ToggleService.instance
+        while (svc == null && System.currentTimeMillis() < end) {
+            Thread.sleep(200)
+            svc = ToggleService.instance
         }
-        val report = Switcher.apply(ctx, wifi, data, bt)
+        return svc
+    }
+
+    fun execute(ctx: Context) {
+        val p = Scheduler.prefs(ctx)
+        applyNow(
+            ctx,
+            p.getBoolean("wifi", false),
+            p.getBoolean("data", false),
+            p.getBoolean("bt", false)
+        )
+    }
+
+    fun applyNow(ctx: Context, wifi: Boolean, data: Boolean, bt: Boolean): String {
+        val svc = waitForService()
+        val report = if (svc == null) {
+            "خدمة إمكانية الوصول مو شغالة، فعّلها من الإعدادات"
+        } else {
+            svc.turnOff(wifi, data, bt)
+        }
         val time = SimpleDateFormat("HH:mm", Locale.US).format(Date())
         Scheduler.prefs(ctx).edit()
             .putString("last", "آخر تنفيذ $time — $report")

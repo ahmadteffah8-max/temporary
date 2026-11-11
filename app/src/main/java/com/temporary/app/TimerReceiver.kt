@@ -11,10 +11,18 @@ class TimerReceiver : BroadcastReceiver() {
         val app = context.applicationContext
 
         Thread {
+            var finished = false
             try {
-                Runner.runDue(app)
+                if (Runner.claim(app)) {
+                    // Make sure the accessibility service is connected, then free the receiver:
+                    // the real work takes longer than a receiver is allowed to run.
+                    Runner.waitForService()
+                    pending.finish()
+                    finished = true
+                    Runner.execute(app)
+                }
             } finally {
-                pending.finish()
+                if (!finished) pending.finish()
             }
         }.start()
     }

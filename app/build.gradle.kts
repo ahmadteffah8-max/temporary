@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "com.temporary.app"
-        minSdk = 24 // Android 7.0 and up (Shizuku API library minimum)
+        minSdk = 23 // Android 6.0 and up
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "3.0"
     }
 
     buildTypes {
@@ -29,9 +29,4 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-}
-
-dependencies {
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
 }

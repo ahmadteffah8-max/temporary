@@ -1,31 +1,27 @@
 package com.temporary.app
 
-import android.Manifest
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
-import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.TimePicker
 import android.widget.Toast
-import rikka.shizuku.Shizuku
 import java.util.Calendar
 import java.util.Locale
 
 class MainActivity : Activity() {
 
-    private lateinit var tvShizuku: TextView
-    private lateinit var rowShizukuButtons: LinearLayout
-    private lateinit var btnPermission: Button
+    private lateinit var tvAccess: TextView
+    private lateinit var btnAccess: Button
     private lateinit var cbWifi: CheckBox
     private lateinit var cbData: CheckBox
     private lateinit var cbBt: CheckBox
@@ -45,20 +41,12 @@ class MainActivity : Activity() {
         }
     }
 
-    private val permissionListener =
-        Shizuku.OnRequestPermissionResultListener { _, _ -> runOnUiThread { refreshShizuku() } }
-    private val binderListener =
-        Shizuku.OnBinderReceivedListener { runOnUiThread { refreshShizuku() } }
-    private val deadListener =
-        Shizuku.OnBinderDeadListener { runOnUiThread { refreshShizuku() } }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        tvShizuku = findViewById(R.id.tvShizuku)
-        rowShizukuButtons = findViewById(R.id.rowShizukuButtons)
-        btnPermission = findViewById(R.id.btnPermission)
+        tvAccess = findViewById(R.id.tvAccess)
+        btnAccess = findViewById(R.id.btnAccess)
         cbWifi = findViewById(R.id.cbWifi)
         cbData = findViewById(R.id.cbData)
         cbBt = findViewById(R.id.cbBt)
@@ -89,35 +77,20 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.btnCancel).setOnClickListener { cancelTimer() }
         findViewById<Button>(R.id.btnTest).setOnClickListener { testNow() }
 
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 5)
-        }
-
-        btnPermission.setOnClickListener {
+        btnAccess.setOnClickListener {
             try {
-                Shizuku.requestPermission(100)
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             } catch (t: Throwable) {
-                toast("Shizuku مو شغال")
+                toast("افتح الإعدادات ← إمكانية الوصول يدوياً")
             }
         }
-        findViewById<Button>(R.id.btnOpenShizuku).setOnClickListener {
-            val intent = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-            if (intent != null) startActivity(intent) else toast("Shizuku مو منزّل")
-        }
-
-        Shizuku.addRequestPermissionResultListener(permissionListener)
-        Shizuku.addBinderReceivedListenerSticky(binderListener)
-        Shizuku.addBinderDeadListener(deadListener)
 
         updateMode()
-        refreshShizuku()
     }
 
     override fun onResume() {
         super.onResume()
-        refreshShizuku()
+        refreshAccess()
         handler.post(ticker)
     }
 
@@ -126,35 +99,31 @@ class MainActivity : Activity() {
         super.onPause()
     }
 
-    override fun onDestroy() {
-        Shizuku.removeRequestPermissionResultListener(permissionListener)
-        Shizuku.removeBinderReceivedListener(binderListener)
-        Shizuku.removeBinderDeadListener(deadListener)
-        super.onDestroy()
-    }
-
     private fun updateMode() {
         val after = rbAfter.isChecked
         panelAfter.visibility = if (after) View.VISIBLE else View.GONE
         timePicker.visibility = if (after) View.GONE else View.VISIBLE
     }
 
-    private fun refreshShizuku() {
-        when (Switcher.state()) {
-            Switcher.READY -> {
-                tvShizuku.text = "Shizuku شغال ✓"
-                rowShizukuButtons.visibility = View.GONE
-            }
-            Switcher.NEED_PERMISSION -> {
-                tvShizuku.text = "Shizuku شغال، لكن التطبيق يحتاج صلاحية"
-                rowShizukuButtons.visibility = View.VISIBLE
-                btnPermission.visibility = View.VISIBLE
-            }
-            else -> {
-                tvShizuku.text = "Shizuku مو شغال. الواي فاي والبلوتث يشتغلون بدونه على أندرويد القديم، لكن البيانات لازم Shizuku."
-                rowShizukuButtons.visibility = View.VISIBLE
-                btnPermission.visibility = View.GONE
-            }
+    private fun accessibilityEnabled(): Boolean {
+        val enabled = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        val component = ComponentName(this, ToggleService::class.java)
+        val full = component.flattenToString()
+        val short = component.flattenToShortString()
+        return enabled.split(':').any { it.equals(full, true) || it.equals(short, true) }
+    }
+
+    private fun refreshAccess() {
+        if (accessibilityEnabled()) {
+            tvAccess.text = "خدمة إمكانية الوصول شغالة ✓"
+            btnAccess.visibility = View.GONE
+        } else {
+            tvAccess.text = "لازم تفعّل خدمة «مؤقت القط» من إعدادات إمكانية الوصول (الخدمات المنزّلة). " +
+                "لو الخيار رمادي في أندرويد 13+: معلومات التطبيق ← ⋮ ← السماح بالإعدادات المقيّدة."
+            btnAccess.visibility = View.VISIBLE
         }
     }
 
@@ -164,6 +133,10 @@ class MainActivity : Activity() {
         val bt = cbBt.isChecked
         if (!wifi && !data && !bt) {
             toast("اختر شي واحد على الأقل")
+            return
+        }
+        if (!accessibilityEnabled()) {
+            toast("فعّل خدمة إمكانية الوصول أول")
             return
         }
 
@@ -187,10 +160,6 @@ class MainActivity : Activity() {
             target = cal.timeInMillis
         }
 
-        if (data && Switcher.state() != Switcher.READY) {
-            toast("تنبيه: البيانات ما تنطفي بدون Shizuku")
-        }
-
         Scheduler.prefs(this).edit()
             .putBoolean("wifi", wifi)
             .putBoolean("data", data)
@@ -198,15 +167,6 @@ class MainActivity : Activity() {
             .putLong("target", target)
             .apply()
         Scheduler.schedule(this, target)
-
-        // Keep the app alive until the timer fires (some phones kill background apps).
-        try {
-            val service = Intent(this, TimerService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service) else startService(service)
-        } catch (t: Throwable) {
-            // The alarm alone still works on most phones.
-        }
-
         refreshStatus()
         toast("تم تشغيل المؤقت")
     }
@@ -214,12 +174,11 @@ class MainActivity : Activity() {
     private fun cancelTimer() {
         Scheduler.cancel(this)
         Scheduler.prefs(this).edit().putLong("target", 0L).commit()
-        stopService(Intent(this, TimerService::class.java))
         refreshStatus()
         toast("انلغى المؤقت")
     }
 
-    /** Runs the switch-off right now, so you can see whether the commands work on your phone. */
+    /** Runs the switch-off right now, so you can see whether it works on your phone. */
     private fun testNow() {
         val wifi = cbWifi.isChecked
         val data = cbData.isChecked
@@ -228,10 +187,14 @@ class MainActivity : Activity() {
             toast("اختر شي واحد على الأقل")
             return
         }
-        tvLast.text = "جاري التجربة..."
+        if (!accessibilityEnabled()) {
+            toast("فعّل خدمة إمكانية الوصول أول")
+            return
+        }
+        tvLast.text = "جاري التجربة... لا تلمس الشاشة"
         val app = applicationContext
         Thread {
-            val report = Runner.applyNow(app, wifi, data, bt, waitForShizuku = false)
+            val report = Runner.applyNow(app, wifi, data, bt)
             runOnUiThread {
                 toast(report)
                 refreshStatus()
@@ -249,8 +212,9 @@ class MainActivity : Activity() {
         } else {
             "ما في مؤقت شغال"
         }
-        tvLast.text = prefs.getString("last", "") ?: ""
+        val last = prefs.getString("last", "") ?: ""
+        if (!tvLast.text.toString().startsWith("جاري")) tvLast.text = last
     }
 
-    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 }

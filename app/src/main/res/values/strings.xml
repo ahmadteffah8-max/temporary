@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">مؤقت القط</string>
+    <string name="service_desc">يستعمله المؤقت ليضغط أزرار الإعدادات بدالك ويطفي الواي فاي وبيانات الجوال والبلوتث في الوقت اللي تحدده. ما يقرأ ولا يرسل أي بيانات.</string>
 </resources>
