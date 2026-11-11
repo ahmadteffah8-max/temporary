@@ -1,6 +1,10 @@
 package com.temporary.app
 
+import android.Manifest
 import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -83,6 +87,13 @@ class MainActivity : Activity() {
 
         findViewById<Button>(R.id.btnStart).setOnClickListener { startTimer() }
         findViewById<Button>(R.id.btnCancel).setOnClickListener { cancelTimer() }
+        findViewById<Button>(R.id.btnTest).setOnClickListener { testNow() }
+
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 5)
+        }
 
         btnPermission.setOnClickListener {
             try {
@@ -140,7 +151,7 @@ class MainActivity : Activity() {
                 btnPermission.visibility = View.VISIBLE
             }
             else -> {
-                tvShizuku.text = "Shizuku مو شغال — شغّله أول (الواي فاي والبلوتث يشتغلون بدونه في أندرويد القديم، البيانات لا)"
+                tvShizuku.text = "Shizuku مو شغال. الواي فاي والبلوتث يشتغلون بدونه على أندرويد القديم، لكن البيانات لازم Shizuku."
                 rowShizukuButtons.visibility = View.VISIBLE
                 btnPermission.visibility = View.GONE
             }
@@ -187,15 +198,45 @@ class MainActivity : Activity() {
             .putLong("target", target)
             .apply()
         Scheduler.schedule(this, target)
+
+        // Keep the app alive until the timer fires (some phones kill background apps).
+        try {
+            val service = Intent(this, TimerService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service) else startService(service)
+        } catch (t: Throwable) {
+            // The alarm alone still works on most phones.
+        }
+
         refreshStatus()
         toast("تم تشغيل المؤقت")
     }
 
     private fun cancelTimer() {
         Scheduler.cancel(this)
-        Scheduler.prefs(this).edit().putLong("target", 0L).apply()
+        Scheduler.prefs(this).edit().putLong("target", 0L).commit()
+        stopService(Intent(this, TimerService::class.java))
         refreshStatus()
         toast("انلغى المؤقت")
+    }
+
+    /** Runs the switch-off right now, so you can see whether the commands work on your phone. */
+    private fun testNow() {
+        val wifi = cbWifi.isChecked
+        val data = cbData.isChecked
+        val bt = cbBt.isChecked
+        if (!wifi && !data && !bt) {
+            toast("اختر شي واحد على الأقل")
+            return
+        }
+        tvLast.text = "جاري التجربة..."
+        val app = applicationContext
+        Thread {
+            val report = Runner.applyNow(app, wifi, data, bt, waitForShizuku = false)
+            runOnUiThread {
+                toast(report)
+                refreshStatus()
+            }
+        }.start()
     }
 
     private fun refreshStatus() {

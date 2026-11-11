@@ -192,6 +192,12 @@
             android:layout_height="wrap_content"
             android:text="إلغاء المؤقت" />
 
+        <Button
+            android:id="@+id/btnTest"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="جرّب الآن (يطفي فوراً)" />
+
         <TextView
             android:id="@+id/tvStatus"
             android:layout_width="match_parent"
