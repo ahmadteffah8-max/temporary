@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.temporary.app"
-        minSdk = 23 // Android 6.0 and up (Shizuku's own minimum)
+        minSdk = 24 // Android 7.0 and up (Shizuku API library minimum)
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
