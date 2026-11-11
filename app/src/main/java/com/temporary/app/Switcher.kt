@@ -61,7 +61,7 @@ object Switcher {
         if (Build.VERSION.SDK_INT >= 29) return false
         return try {
             val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            !wm.isWifiEnabled || wm.setWifiEnabled(false)
+            if (wm.isWifiEnabled) wm.setWifiEnabled(false) else true
         } catch (t: Throwable) {
             false
         }
@@ -73,7 +73,7 @@ object Switcher {
         if (Build.VERSION.SDK_INT >= 31) return false
         return try {
             val a = BluetoothAdapter.getDefaultAdapter() ?: return false
-            !a.isEnabled || a.disable()
+            if (a.isEnabled) a.disable() else true
         } catch (t: Throwable) {
             false
         }
