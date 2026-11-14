@@ -37,16 +37,17 @@ object Runner {
             ctx,
             p.getBoolean("wifi", false),
             p.getBoolean("data", false),
-            p.getBoolean("bt", false)
+            p.getBoolean("bt", false),
+            p.getBoolean("screen", false)
         )
     }
 
-    fun applyNow(ctx: Context, wifi: Boolean, data: Boolean, bt: Boolean): String {
+    fun applyNow(ctx: Context, wifi: Boolean, data: Boolean, bt: Boolean, screen: Boolean): String {
         val svc = waitForService()
         val report = if (svc == null) {
             "خدمة إمكانية الوصول مو شغالة، فعّلها من الإعدادات"
         } else {
-            svc.turnOff(wifi, data, bt)
+            svc.turnOff(wifi, data, bt, screen)
         }
         val time = SimpleDateFormat("HH:mm", Locale.US).format(Date())
         Scheduler.prefs(ctx).edit()

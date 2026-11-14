@@ -50,45 +50,59 @@ class ToggleService : AccessibilityService() {
     /** Runs the whole job and returns a short Arabic report. Blocking, call it from a worker thread. */
     @Synchronized
     @Suppress("DEPRECATION")
-    fun turnOff(wifi: Boolean, data: Boolean, bt: Boolean): String {
+    fun turnOff(wifi: Boolean, data: Boolean, bt: Boolean, screen: Boolean): String {
         val ctx = applicationContext
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         val screenWasOn = pm.isInteractive
 
-        // Wake the screen so the panels can be seen.
-        var wakeLock: PowerManager.WakeLock? = null
-        try {
-            wakeLock = pm.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "temporary:toggle"
-            )
-            wakeLock.acquire(120_000L)
-        } catch (e: Throwable) {
-            // continue without it
-        }
-
+        val wanted = listOf(Target.WIFI to wifi, Target.DATA to data, Target.BT to bt)
+            .filter { it.second }
+            .map { it.first }
+        val errors = HashMap<Target, String>()
         val ok = mutableListOf<String>()
         val failed = mutableListOf<String>()
+        var wakeLock: PowerManager.WakeLock? = null
+        var woke = false
+
         try {
-            if (!screenWasOn) pause(1500)
+            // Quick direct attempt (works on old Android and needs no screen).
+            var tried = false
+            if (Target.WIFI in wanted && State.wifiOn(ctx)) {
+                Direct.wifiOff(ctx)
+                tried = true
+            }
+            if (Target.BT in wanted && State.btOn(ctx)) {
+                Direct.bluetoothOff()
+                tried = true
+            }
+            if (tried) pause(1200)
 
-            // Quick direct attempt (works on old Android).
-            if (wifi && State.wifiOn(ctx)) Direct.wifiOff(ctx)
-            if (bt && State.btOn(ctx)) Direct.bluetoothOff()
-            pause(1200)
-
-            val jobs = listOf(Target.WIFI to wifi, Target.DATA to data, Target.BT to bt)
-            for ((target, wanted) in jobs) {
-                if (!wanted) continue
-                if (!isOn(target)) {
-                    ok.add(target.label)
-                    continue
+            // Only wake the screen when something still has to be pressed by hand.
+            val needUi = wanted.filter { isOn(it) }
+            if (needUi.isNotEmpty()) {
+                try {
+                    wakeLock = pm.newWakeLock(
+                        PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                        "temporary:toggle"
+                    )
+                    wakeLock.acquire(120_000L)
+                } catch (e: Throwable) {
+                    // continue without it
                 }
-                val err = viaUi(target)
-                if (!isOn(target)) {
-                    ok.add(target.label)
+                if (!screenWasOn) {
+                    woke = true
+                    pause(1500)
+                }
+                for (t in needUi) {
+                    errors[t] = viaUi(t)
+                }
+            }
+
+            for (t in wanted) {
+                if (!isOn(t)) {
+                    ok.add(t.label)
                 } else {
-                    failed.add("${target.label} ($err)")
+                    failed.add("${t.label} (${errors[t].orEmpty().ifBlank { "ما اشتغل" }})")
                 }
             }
         } catch (e: Throwable) {
@@ -96,13 +110,23 @@ class ToggleService : AccessibilityService() {
         } finally {
             try {
                 closeUi()
-                if (!screenWasOn && Build.VERSION.SDK_INT >= 28) {
-                    performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
-                }
                 if (wakeLock != null && wakeLock.isHeld) wakeLock.release()
             } catch (e: Throwable) {
                 // ignore
             }
+        }
+
+        // The screen goes last, after everything else is done (and after the wake lock is released).
+        if (screen) {
+            if (!screenWasOn && !woke) {
+                ok.add("الشاشة (كانت مطفية)")
+            } else {
+                val err = lockScreen()
+                if (err.isEmpty()) ok.add("الشاشة") else failed.add("الشاشة ($err)")
+            }
+        } else if (woke) {
+            // We turned the screen on only to do the work, so put it back to sleep.
+            lockScreen()
         }
 
         val sb = StringBuilder()
@@ -112,6 +136,17 @@ class ToggleService : AccessibilityService() {
             sb.append("ما اشتغل: ").append(failed.joinToString(" ؛ "))
         }
         return sb.toString()
+    }
+
+    /** Locks the screen (turns it off). Returns an empty string on success, or the reason it failed. */
+    private fun lockScreen(): String {
+        return if (Build.VERSION.SDK_INT >= 28) {
+            if (performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)) "" else "النظام رفض أمر القفل"
+        } else if (Direct.lockWithAdmin(applicationContext)) {
+            ""
+        } else {
+            "فعّل «مدير الجهاز» للتطبيق (أندرويد أقدم من 9)"
+        }
     }
 
     private fun isOn(t: Target): Boolean = when (t) {

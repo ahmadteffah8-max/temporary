@@ -1,7 +1,9 @@
 package com.temporary.app
 
 import android.annotation.SuppressLint
+import android.app.admin.DevicePolicyManager
 import android.bluetooth.BluetoothAdapter
+import android.content.ComponentName
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -62,5 +64,27 @@ object Direct {
         } catch (t: Throwable) {
             false
         }
+    }
+
+    private fun adminComponent(ctx: Context) = ComponentName(ctx, AdminReceiver::class.java)
+
+    fun adminActive(ctx: Context): Boolean = try {
+        val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        dpm.isAdminActive(adminComponent(ctx))
+    } catch (t: Throwable) {
+        false
+    }
+
+    /** Locks the screen through device admin. Used only on Android older than 9. */
+    fun lockWithAdmin(ctx: Context): Boolean = try {
+        val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        if (dpm.isAdminActive(adminComponent(ctx))) {
+            dpm.lockNow()
+            true
+        } else {
+            false
+        }
+    } catch (t: Throwable) {
+        false
     }
 }
