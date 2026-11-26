@@ -6,8 +6,7 @@ on:
     paths:
       - 'EchoKey/**'
       - '.github/workflows/build-echokey.yml'
-    paths-ignore:
-      - 'EchoKey/dist/**'
+      - '!EchoKey/dist/**'
   workflow_dispatch:
 
 permissions:
