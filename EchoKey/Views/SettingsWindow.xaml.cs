@@ -26,7 +26,22 @@ public partial class SettingsWindow : Window
         UpdateLatencyText();
         StartupBox.IsChecked = StartupService.IsEnabled;
         TrayBox.IsChecked = vm.Settings.CloseToTray;
+        MonitorBox.IsChecked = vm.Settings.MonitorEnabled;
         PopulateDevices();
+        UpdateStopHotkeyText();
+    }
+
+    void UpdateStopHotkeyText() => StopHotkeyButton.Content = _vm.StopAllHotkeyLabel;
+
+    void StopHotkey_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new HotkeyDialog(this, Loc.I["stopAll"], _vm.Settings.StopAllHotkey);
+        if (dlg.ShowDialog() != true) return;
+
+        string? conflict = _vm.SetStopAllHotkey(dlg.Result); // saved immediately and persisted
+        if (conflict != null)
+            Dialogs.Info(this, Loc.I.Format("conflict", conflict), "EchoKey");
+        UpdateStopHotkeyText();
     }
 
     void PopulateDevices()
@@ -41,8 +56,13 @@ public partial class SettingsWindow : Window
         var outs = new List<DeviceInfo> { new("auto", Loc.I["autoOutput"]) };
         outs.AddRange(AudioEngine.GetRenderDevices());
 
+        var monitors = new List<DeviceInfo> { new("default", Loc.I["defaultDevice"]) };
+        monitors.AddRange(AudioEngine.GetRenderDevices().Where(d => !AudioEngine.IsVirtualCable(d.Name)));
+
         MicBox.ItemsSource = mics;
         OutBox.ItemsSource = outs;
+        MonitorDeviceBox.ItemsSource = monitors;
+        MonitorDeviceBox.SelectedValue = Pick(monitors, _vm.Settings.MonitorDeviceId, "default");
         MicBox.SelectedValue = Pick(mics, _vm.Settings.MicDeviceId, "default");
         OutBox.SelectedValue = Pick(outs, _vm.Settings.OutputDeviceId, "auto");
     }
@@ -55,7 +75,9 @@ public partial class SettingsWindow : Window
         // keep the user's current (unsaved) choice if it still exists
         string? mic = MicBox.SelectedValue as string;
         string? outp = OutBox.SelectedValue as string;
+        string? mon = MonitorDeviceBox.SelectedValue as string;
         PopulateDevices();
+        if (mon != null && ((List<DeviceInfo>)MonitorDeviceBox.ItemsSource).Any(d => d.Id == mon)) MonitorDeviceBox.SelectedValue = mon;
         if (mic != null && ((List<DeviceInfo>)MicBox.ItemsSource).Any(d => d.Id == mic)) MicBox.SelectedValue = mic;
         if (outp != null && ((List<DeviceInfo>)OutBox.ItemsSource).Any(d => d.Id == outp)) OutBox.SelectedValue = outp;
     }
@@ -76,6 +98,8 @@ public partial class SettingsWindow : Window
         _vm.ApplyAudioSettings(
             MicBox.SelectedValue as string ?? "default",
             OutBox.SelectedValue as string ?? "auto",
+            MonitorDeviceBox.SelectedValue as string ?? "default",
+            MonitorBox.IsChecked == true,
             (int)LatencySlider.Value);
         DialogResult = true;
     }

@@ -95,6 +95,12 @@ public sealed class AppSettings
     /// <summary>"auto" = VB-CABLE (CABLE Input), otherwise a render device id.</summary>
     public string? OutputDeviceId { get; set; } = "auto";
     public bool CableHelpShown { get; set; }
+    /// <summary>Play normal sounds on my speakers too (the microphone is never sent there).</summary>
+    public bool MonitorEnabled { get; set; } = true;
+    /// <summary>"default" = Windows default playback device (never the virtual cable), otherwise a render device id.</summary>
+    public string? MonitorDeviceId { get; set; } = "default";
+    /// <summary>Global shortcut that stops every sound.</summary>
+    public HotkeyBinding? StopAllHotkey { get; set; }
     public float MicVolume { get; set; } = 1f;
     public float SoundboardVolume { get; set; } = 1f;
     public bool MicEnabled { get; set; } = true;

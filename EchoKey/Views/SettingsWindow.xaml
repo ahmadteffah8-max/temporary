@@ -25,6 +25,13 @@
         <Button HorizontalAlignment="Left" Click="Refresh_Click" Margin="0,0,0,16" Padding="12,6"
                 Content="{Binding [refresh], Source={x:Static core:Loc.I}}"/>
 
+        <CheckBox x:Name="MonitorBox" Margin="0,0,0,10" Content="{Binding [monitorEnabled], Source={x:Static core:Loc.I}}"/>
+        <TextBlock Text="{Binding [monitorDevice], Source={x:Static core:Loc.I}}" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,6"/>
+        <ComboBox x:Name="MonitorDeviceBox" DisplayMemberPath="Name" SelectedValuePath="Id" Margin="0,0,0,16"/>
+
+        <TextBlock Text="{Binding [stopAllHotkey], Source={x:Static core:Loc.I}}" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,6"/>
+        <Button x:Name="StopHotkeyButton" HorizontalAlignment="Left" Click="StopHotkey_Click" Margin="0,0,0,16" Padding="14,7" MinWidth="150"/>
+
         <TextBlock x:Name="LatencyText" Margin="0,0,0,4"/>
         <Slider x:Name="LatencySlider" Minimum="10" Maximum="200" TickFrequency="5" IsSnapToTickEnabled="True"
                 ValueChanged="Latency_Changed"/>

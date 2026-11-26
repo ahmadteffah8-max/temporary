@@ -1,4 +1,4 @@
-name: Build EchoKey (Windows EXE)
+name: Build EchoKey (test + installer)
 
 on:
   push:
@@ -11,6 +11,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  APP_VERSION: 1.1.${{ github.run_number }}
 
 jobs:
   build:
@@ -25,45 +28,122 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Publish framework-dependent (small)
-        run: >
-          dotnet publish EchoKey.csproj -c Release -r win-x64 --self-contained false
-          -p:PublishSingleFile=true -p:PublishReadyToRun=true -o publish/framework-dependent
+      - name: Build app + tests
+        run: dotnet build Tests/EchoKey.Tests.csproj -c Release
 
-      - name: Publish self-contained (no .NET install needed)
+      - name: Unit tests
+        run: dotnet test Tests/EchoKey.Tests.csproj -c Release --no-build --logger "trx;LogFileName=results.trx" --logger "console;verbosity=normal"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: EchoKey/Tests/TestResults/*.trx
+
+      - name: Publish app folder (self-contained, includes .NET)
         run: >
           dotnet publish EchoKey.csproj -c Release -r win-x64 --self-contained true
-          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishReadyToRun=true
-          -o publish/self-contained
+          -p:PublishReadyToRun=true -p:Version=${{ env.APP_VERSION }} -o publish/app
 
-      - name: Rename outputs
+      - name: Publish small portable EXE (needs .NET 10 Desktop Runtime)
+        run: >
+          dotnet publish EchoKey.csproj -c Release -r win-x64 --self-contained false
+          -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=${{ env.APP_VERSION }} -o publish/portable
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
         shell: pwsh
         run: |
-          Copy-Item publish/framework-dependent/EchoKey.exe publish/EchoKey.exe
-          Copy-Item publish/self-contained/EchoKey.exe publish/EchoKey-self-contained.exe
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ env.APP_VERSION }}" "/DSourceDir=..\publish\app" installer\EchoKey.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-Item publish\installer\EchoKey-Setup.exe | Format-List Name, Length
+
+      # ---------------- installer test: install -> check -> run -> uninstall -> check ----------------
+      - name: Test installer (silent install, shortcuts, uninstall entry)
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\install.log"
+          $p = Start-Process publish\installer\EchoKey-Setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/TASKS=desktopicon","/LOG=$log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "installer exit code $($p.ExitCode)" }
+
+          $dir = "$env:ProgramFiles\EchoKey"
+          $checks = @{
+            "EchoKey.exe installed"        = Test-Path "$dir\EchoKey.exe"
+            "uninstaller installed"        = (Get-ChildItem $dir -Filter "unins*.exe").Count -gt 0
+            "Desktop shortcut"             = Test-Path "$env:PUBLIC\Desktop\EchoKey.lnk"
+            "Start menu shortcut"          = Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\EchoKey.lnk"
+            "Uninstall entry (Settings > Apps)" = (Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" | Where-Object { $_.PSChildName -like "{8B2F6C1E-4D3A-4F6B-9A57-3C1E0D2B7A91}*" }).Count -eq 1
+          }
+          $checks.GetEnumerator() | Sort-Object Name | ForEach-Object { "{0,-40} {1}" -f $_.Name, $_.Value }
+          if ($checks.Values -contains $false) { throw "installer check failed" }
+
+          # shortcut really points to the installed exe
+          $sh = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:PUBLIC\Desktop\EchoKey.lnk")
+          "Desktop shortcut target: $($sh.TargetPath)"
+          if ($sh.TargetPath -ne "$dir\EchoKey.exe") { throw "desktop shortcut points to the wrong file" }
+
+      - name: Smoke test (installed app starts, stays alive, writes no crash log)
+        shell: pwsh
+        run: |
+          $proc = Start-Process "$env:ProgramFiles\EchoKey\EchoKey.exe" -ArgumentList "--tray" -PassThru
+          Start-Sleep -Seconds 12
+          $proc.Refresh()
+          if ($proc.HasExited) { throw "EchoKey exited early with code $($proc.ExitCode)" }
+          "EchoKey running, working set: {0:N0} MB" -f ($proc.WorkingSet64 / 1MB)
+          $err = "$env:APPDATA\EchoKey\error.log"
+          if (Test-Path $err) { Get-Content $err; throw "error.log was written" }
+          Stop-Process -Id $proc.Id -Force
+
+      - name: Test uninstall
+        shell: pwsh
+        run: |
+          $u = Get-ChildItem "$env:ProgramFiles\EchoKey" -Filter "unins*.exe" | Select-Object -First 1
+          $p = Start-Process $u.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstaller exit code $($p.ExitCode)" }
+          Start-Sleep -Seconds 3
+          $gone = @{
+            "program folder removed" = -not (Test-Path "$env:ProgramFiles\EchoKey\EchoKey.exe")
+            "Desktop shortcut removed" = -not (Test-Path "$env:PUBLIC\Desktop\EchoKey.lnk")
+            "Start menu shortcut removed" = -not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\EchoKey.lnk")
+            "Uninstall entry removed" = (Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" | Where-Object { $_.PSChildName -like "{8B2F6C1E-4D3A-4F6B-9A57-3C1E0D2B7A91}*" }).Count -eq 0
+          }
+          $gone.GetEnumerator() | Sort-Object Name | ForEach-Object { "{0,-32} {1}" -f $_.Name, $_.Value }
+          if ($gone.Values -contains $false) { throw "uninstall check failed" }
+
+      # ---------------- publish ----------------
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item publish\installer\EchoKey-Setup.exe release\EchoKey-Setup.exe
+          Copy-Item publish\portable\EchoKey.exe release\EchoKey-portable.exe
 
       - uses: actions/upload-artifact@v4
         with:
-          name: EchoKey
-          path: |
-            EchoKey/publish/EchoKey.exe
-            EchoKey/publish/EchoKey-self-contained.exe
+          name: EchoKey-installer
+          path: EchoKey/release/*
 
-      - name: Release
+      - name: GitHub Release (latest)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: echokey-latest
           name: EchoKey (latest build)
+          body: "Installer: EchoKey-Setup.exe (includes .NET, creates Desktop + Start-menu shortcuts, uninstall from Windows Settings). Portable: EchoKey-portable.exe (needs the .NET 10 Desktop Runtime). Build ${{ env.APP_VERSION }}."
           files: |
-            EchoKey/publish/EchoKey.exe
-            EchoKey/publish/EchoKey-self-contained.exe
+            EchoKey/release/EchoKey-Setup.exe
+            EchoKey/release/EchoKey-portable.exe
 
-      - name: Commit small EXE into EchoKey/dist
+      - name: Keep the small portable EXE in EchoKey/dist
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item publish/EchoKey.exe dist/EchoKey.exe -Force
+          Copy-Item release\EchoKey-portable.exe dist\EchoKey.exe -Force
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -f dist/EchoKey.exe
-          git diff --cached --quiet; if ($LASTEXITCODE -ne 0) { git commit -m "EchoKey: update built EXE [skip ci]"; git pull --rebase origin main; git push }
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) { git commit -m "EchoKey: update portable EXE [skip ci]"; git pull --rebase origin main; git push }

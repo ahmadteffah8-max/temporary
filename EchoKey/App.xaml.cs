@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Runtime;
 using System.Linq;
 using System.Threading;
 using System.Windows;
@@ -23,6 +24,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        try { GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency; } catch { }
 
         _mutex = new Mutex(true, "EchoKey.SingleInstance.Mutex", out bool created);
         _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "EchoKey.ShowWindow.Event");

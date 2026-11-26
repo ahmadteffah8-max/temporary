@@ -189,7 +189,7 @@
                             <TextBlock Text="{Binding [hotkeys], Source={x:Static core:Loc.I}}"/>
                         </StackPanel>
                     </ToggleButton>
-                    <Button Style="{StaticResource DangerButton}" Click="StopAll_Click" Margin="0,0,8,0"
+                    <Button Style="{StaticResource DangerButton}" Click="StopAll_Click" Margin="0,0,8,0" ToolTip="{Binding StopAllTooltip}"
                             Content="{Binding [stopAll], Source={x:Static core:Loc.I}}"/>
                     <Button Style="{StaticResource IconButton}" Content="&#xE713;" FontSize="18" Click="Settings_Click"
                             ToolTip="{Binding [settings], Source={x:Static core:Loc.I}}"/>

@@ -45,6 +45,15 @@ public sealed class Loc : INotifyPropertyChanged
 
     public string Format(string key, params object?[] args) => string.Format(Get(key), args);
 
+    /// <summary>Keys present in one language but missing in the other (used by the unit tests).</summary>
+    public static List<string> MissingTranslations()
+    {
+        var missing = new List<string>();
+        foreach (var k in En.Keys) if (!Ar.ContainsKey(k)) missing.Add("ar:" + k);
+        foreach (var k in Ar.Keys) if (!En.ContainsKey(k)) missing.Add("en:" + k);
+        return missing;
+    }
+
     static readonly Dictionary<string, string> En = new()
     {
         ["soundboard"] = "Soundboard",
@@ -111,6 +120,12 @@ public sealed class Loc : INotifyPropertyChanged
         ["micFailed"] = "Microphone unavailable: {0}",
         ["trayOpen"] = "Open EchoKey",
         ["trayExit"] = "Exit",
+        ["stopAllHotkey"] = "Stop-all hotkey",
+        ["monitorEnabled"] = "Hear the sounds on my speakers / headphones (your microphone is never sent there)",
+        ["monitorDevice"] = "My speakers / headphones",
+        ["micNeedsCable"] = "The microphone is not sent because the output is not a virtual cable (it would echo in your speakers). Choose VB-CABLE as the output.",
+        ["monitorIsCable"] = "The speakers device cannot be the virtual cable.",
+        ["monitorError"] = "Speakers error: {0}",
         ["confirmDelete"] = "Delete “{0}” from the library?",
         ["confirmDeleteCategory"] = "Delete the category “{0}”? Its sounds are kept (moved to Uncategorized).",
     };
@@ -181,6 +196,12 @@ public sealed class Loc : INotifyPropertyChanged
         ["micFailed"] = "الميكروفون غير متاح: {0}",
         ["trayOpen"] = "فتح EchoKey",
         ["trayExit"] = "إغلاق البرنامج",
+        ["stopAllHotkey"] = "اختصار إيقاف الكل",
+        ["monitorEnabled"] = "سماع الأصوات على سماعاتي (لا يُرسل الميكروفون إليها أبدًا)",
+        ["monitorDevice"] = "سماعاتي",
+        ["micNeedsCable"] = "لم يُرسل الميكروفون لأن جهاز الإخراج ليس كابلًا افتراضيًا (سيرتد صوتك في سماعاتك). اختر VB-CABLE كجهاز إخراج.",
+        ["monitorIsCable"] = "لا يمكن أن يكون جهاز السماعات هو الكابل الافتراضي.",
+        ["monitorError"] = "خطأ في السماعات: {0}",
         ["confirmDelete"] = "حذف «{0}» من المكتبة؟",
         ["confirmDeleteCategory"] = "حذف التصنيف «{0}»؟ ستبقى أصواته (تنتقل إلى «بدون تصنيف»).",
     };

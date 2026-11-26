@@ -29,6 +29,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     int _houseTick;
     bool _noOutputShown;
     string? _lastEngineError;
+    string? _lastMonitorError;
 
     public AudioEngine Engine { get; } = new();
     public AppSettings Settings => _storage.Settings;
@@ -66,7 +67,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _sbVol = s.SoundboardVolume;
         Engine.Mixer.MicEnabled = _micEnabled;
         Engine.Mixer.MicVolume = (float)_micVol;
-        Engine.Mixer.SoundboardVolume = (float)_sbVol;
+        Engine.SetSoundboardVolume((float)_sbVol);
+        Engine.MonitorEnabled = s.MonitorEnabled;
 
         foreach (var item in _storage.Library.Sounds.OrderBy(x => x.Order))
             _all.Add(CreateVm(item));
@@ -145,7 +147,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (!Set(ref _sbVol, value)) return;
             Settings.SoundboardVolume = (float)value;
-            Engine.Mixer.SoundboardVolume = (float)value;
+            Engine.SetSoundboardVolume((float)value);
             Raise(nameof(SoundboardVolumeText));
             _storage.RequestSave();
         }
@@ -189,20 +191,28 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     // ------------------------------------------------------------------ engine
 
+    EngineConfig CurrentConfig() =>
+        new(Settings.MicDeviceId, Settings.OutputDeviceId, Settings.MonitorDeviceId, Settings.OutputLatencyMs);
+
     void StartEngine()
     {
-        Engine.Start(Settings.MicDeviceId, Settings.OutputDeviceId, Settings.OutputLatencyMs);
+        Engine.Apply(CurrentConfig());
         ReportEngine();
     }
 
-    public void ApplyAudioSettings(string micId, string outId, int latencyMs)
+    /// <summary>Applies new audio settings. Only the parts that changed are restarted, each one faded out first.</summary>
+    public void ApplyAudioSettings(string micId, string outId, string monitorId, bool monitorEnabled, int latencyMs)
     {
         Settings.MicDeviceId = micId;
         Settings.OutputDeviceId = outId;
+        Settings.MonitorDeviceId = monitorId;
+        Settings.MonitorEnabled = monitorEnabled;
         Settings.OutputLatencyMs = latencyMs;
+        Engine.MonitorEnabled = monitorEnabled;
         _storage.RequestSave();
         _noOutputShown = false;
         _lastEngineError = null;
+        _lastMonitorError = null;
         StartEngine();
     }
 
@@ -227,17 +237,28 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 break;
         }
 
+        if (Engine.MonitorState == EngineState.Error)
+        {
+            if (_lastMonitorError != Engine.MonitorError)
+            {
+                _lastMonitorError = Engine.MonitorError;
+                Notify(Loc.I.Format("monitorError", Engine.MonitorError));
+            }
+        }
+        else if (Engine.MonitorState == EngineState.Running) _lastMonitorError = null;
+
         if (Engine.MicWarning == "virtualCableAsMic") Notify(Loc.I["micIsCable"]);
+        else if (Engine.MicWarning == "micNeedsCable") Notify(Loc.I["micNeedsCable"]);
         else if (Engine.MicWarning == "micFailed") Notify(Loc.I.Format("micFailed", Engine.MicWarningDetail));
+        if (Engine.MonitorWarning == "monitorIsCable") Notify(Loc.I["monitorIsCable"]);
     }
 
     void HouseTick()
     {
-        Engine.Housekeeping();
         if (Engine.NeedsRestart)
         {
-            // device unplugged / VB-CABLE just installed / driver restarted: try again quietly
-            Engine.Start(Settings.MicDeviceId, Settings.OutputDeviceId, Settings.OutputLatencyMs);
+            // device unplugged / VB-CABLE just installed / driver restarted: retry only the broken stream, quietly
+            Engine.Retry();
             ReportEngine();
         }
         else if (_windowVisible && ++_houseTick % 5 == 0)
@@ -258,7 +279,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     void UiTick()
     {
-        int total = Engine.Mixer.Snapshot(_counts);
+        int total = Engine.Snapshot(_counts);
         foreach (var v in _all)
         {
             _counts.TryGetValue(v.Item.Id, out int c);
@@ -276,7 +297,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public void PlaySound(SoundViewModel vm)
     {
         if (!_sbEnabled) return;
-        if (!Engine.IsRunning)
+        if (!Engine.CanPlay)
         {
             Notify(Loc.I["noOutput"]);
             return;
@@ -286,7 +307,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         var task = _cache.GetAsync(item);
         if (task.IsCompletedSuccessfully)
         {
-            Engine.Mixer.Play(item.Id, task.Result, item.Volume); // instant, every press = new overlapping voice
+            Engine.Play(item.Id, task.Result, item.Volume); // instant, every press = new overlapping voice
             return;
         }
         _ = PlayWhenReady(item, task);
@@ -297,7 +318,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         try
         {
             var data = await task;
-            if (_sbEnabled && Engine.IsRunning) Engine.Mixer.Play(item.Id, data, item.Volume);
+            if (_sbEnabled && Engine.CanPlay) Engine.Play(item.Id, data, item.Volume);
         }
         catch (Exception ex)
         {
@@ -310,7 +331,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         try
         {
             var data = await _cache.GetAsync(vm.Item);
-            Engine.Preview(vm.Item.Id, data, vm.Item.Volume * (float)_sbVol);
+            Engine.Preview(vm.Item.Id, data, vm.Item.Volume); // speakers only; master volume is applied by the mixer
         }
         catch (Exception ex)
         {
@@ -320,8 +341,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public void StopAll()
     {
-        Engine.Mixer.StopAll();
-        Engine.StopPreview();
+        Engine.StopAll();
     }
 
     // ------------------------------------------------------------------ hotkeys
@@ -331,6 +351,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _hotkeys.UnregisterAll();
         foreach (var v in _all) v.HotkeyFailed = false;
         if (!_hkEnabled) return;
+
+        var stop = Settings.StopAllHotkey;
+        if (stop != null && _hotkeys.Register(stop, StopAll) == 0)
+            Notify(Loc.I.Format("registerFail", stop.ToString()));
 
         foreach (var v in _all)
         {
@@ -346,15 +370,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>Returns false (and shows a warning) when another sound already uses the shortcut.</summary>
+    /// <summary>Name of whatever already uses this shortcut (another sound or "Stop all"), or null when it is free.</summary>
+    public string? FindConflict(HotkeyBinding hk, SoundViewModel? exceptSound, bool exceptStopAll)
+    {
+        var other = _all.FirstOrDefault(o => o != exceptSound && hk.SameAs(o.Item.Hotkey));
+        if (other != null) return other.Item.Name;
+        if (!exceptStopAll && hk.SameAs(Settings.StopAllHotkey)) return Loc.I["stopAll"];
+        return null;
+    }
+
+    /// <summary>Returns false (and shows a warning) when another sound or Stop-all already uses the shortcut.</summary>
     public bool SetHotkey(SoundViewModel vm, HotkeyBinding? hk)
     {
         if (hk != null)
         {
-            var other = _all.FirstOrDefault(o => o != vm && hk.SameAs(o.Item.Hotkey));
+            string? other = FindConflict(hk, vm, false);
             if (other != null)
             {
-                Notify(Loc.I.Format("conflict", other.Item.Name));
+                Notify(Loc.I.Format("conflict", other));
                 return false;
             }
         }
@@ -363,6 +396,28 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ApplyHotkeys();
         _storage.RequestSave();
         return true;
+    }
+
+    public string StopAllHotkeyText => Settings.StopAllHotkey?.ToString() ?? "";
+    public string StopAllHotkeyLabel => Settings.StopAllHotkey != null ? Settings.StopAllHotkey.ToString() : "＋ " + Loc.I["setHotkey"];
+    public string StopAllTooltip =>
+        Settings.StopAllHotkey != null ? Loc.I["stopAll"] + "  (" + Settings.StopAllHotkey + ")" : Loc.I["stopAll"];
+
+    /// <summary>Saves the Stop-all shortcut (null removes it). Returns the conflicting name when it cannot be used.</summary>
+    public string? SetStopAllHotkey(HotkeyBinding? hk)
+    {
+        if (hk != null)
+        {
+            string? other = FindConflict(hk, null, true);
+            if (other != null) return other;
+        }
+        Settings.StopAllHotkey = hk;
+        Raise(nameof(StopAllHotkeyText));
+        Raise(nameof(StopAllHotkeyLabel));
+        Raise(nameof(StopAllTooltip));
+        ApplyHotkeys();
+        _storage.RequestSave();
+        return null;
     }
 
     // ------------------------------------------------------------------ library
@@ -539,6 +594,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         foreach (var v in _all) v.RefreshLoc();
         Raise(nameof(CableText));
         Raise(nameof(ActiveText));
+        Raise(nameof(StopAllHotkeyLabel));
+        Raise(nameof(StopAllTooltip));
     }
 
     public void SaveNow() => _storage.SaveNow();

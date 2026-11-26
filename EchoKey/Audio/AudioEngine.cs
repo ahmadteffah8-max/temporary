@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -10,28 +11,51 @@ public sealed record DeviceInfo(string Id, string Name);
 
 public enum EngineState { Stopped, Running, NoOutputDevice, Error }
 
-/// <summary>Owns the WASAPI output (virtual cable), the microphone capture and the preview output.</summary>
+public sealed record EngineConfig(string? MicId, string? OutputId, string? MonitorId, int LatencyMs);
+
+/// <summary>
+/// Two independent output channels that run at the same time:
+///   1. Virtual mic  : real microphone + soundboard  ->  VB-CABLE (what other programs hear)
+///   2. My speakers  : soundboard ONLY               ->  my headphones/speakers (never the microphone)
+/// Each channel has its own mixer and its own WASAPI stream. A sound that is played is added to both.
+/// Devices are only ever stopped after the stream has faded to silence.
+/// </summary>
 public sealed class AudioEngine : IDisposable
 {
+    /// <summary>Channel 1: microphone + soundboard, sent to the virtual cable.</summary>
     public MixerProvider Mixer { get; } = new();
-    readonly MixerProvider _previewMixer = new();
+    /// <summary>Channel 2: soundboard only, sent to the user's speakers. Never has a microphone.</summary>
+    public MixerProvider MonitorMixer { get; } = new();
 
     OutputPipe? _main;
-    OutputPipe? _preview;
+    OutputPipe? _monitor;
     WasapiCapture? _capture;
     MMDevice? _micDevice;
-    int _previewIdleTicks;
+    EngineConfig? _cfg;
 
     public EngineState State { get; private set; } = EngineState.Stopped;
+    public EngineState MonitorState { get; private set; } = EngineState.Stopped;
     public string? LastError { get; private set; }
+    public string? MonitorError { get; private set; }
     public string? OutputName { get; private set; }
+    public string? MonitorName { get; private set; }
     public string? MicName { get; private set; }
-    /// <summary>"virtualCableAsMic" or "micFailed" when the microphone could not be used.</summary>
+    /// <summary>"virtualCableAsMic", "micNeedsCable" or "micFailed" when the microphone could not be used.</summary>
     public string? MicWarning { get; private set; }
     public string? MicWarningDetail { get; private set; }
+    /// <summary>"monitorIsCable" when the chosen speakers device is a virtual cable.</summary>
+    public string? MonitorWarning { get; private set; }
+
+    /// <summary>When false, normal sounds are not played on the speakers (the preview button still is).</summary>
+    public bool MonitorEnabled { get; set; } = true;
 
     public bool IsRunning => State == EngineState.Running;
-    public bool NeedsRestart => State == EngineState.NoOutputDevice || State == EngineState.Error;
+    public bool MonitorRunning => MonitorState == EngineState.Running;
+    public bool CanPlay => IsRunning || (MonitorEnabled && MonitorRunning);
+
+    public bool NeedsRestart =>
+        State == EngineState.NoOutputDevice || State == EngineState.Error ||
+        MonitorState == EngineState.NoOutputDevice || MonitorState == EngineState.Error;
 
     // ---------- device helpers ----------
 
@@ -96,55 +120,181 @@ public sealed class AudioEngine : IDisposable
         return found;
     }
 
-    // ---------- lifecycle ----------
+    // ---------- configuration / lifecycle ----------
 
-    public void Start(string? micId, string? outId, int latencyMs)
+    /// <summary>
+    /// Applies a configuration. Only the parts that actually changed are restarted, and every restarted stream is
+    /// faded to silence first, so changing settings does not click, buzz or leave a sound hanging.
+    /// </summary>
+    public void Apply(EngineConfig cfg, bool forceMain = false, bool forceMonitor = false)
     {
-        StopInternal();
+        var old = _cfg;
+        _cfg = cfg;
+        int latency = Math.Clamp(cfg.LatencyMs, 10, 300);
+
+        bool mainChanged = forceMain || old == null || old.OutputId != cfg.OutputId || old.LatencyMs != cfg.LatencyMs;
+        bool monitorChanged = forceMonitor || old == null || old.MonitorId != cfg.MonitorId || old.LatencyMs != cfg.LatencyMs
+                              || old.OutputId != cfg.OutputId; // the monitor must not duplicate the main device
+        bool micChanged = mainChanged || old == null || old.MicId != cfg.MicId;
+
+        // 1) quiet phase: fade the affected streams to silence, then stop them
+        var fading = new List<MixerProvider>();
+        if (mainChanged && _main != null && State == EngineState.Running) { Mixer.GateOpen = false; fading.Add(Mixer); }
+        if (monitorChanged && _monitor != null && MonitorState == EngineState.Running) { MonitorMixer.GateOpen = false; fading.Add(MonitorMixer); }
+        if (!mainChanged && micChanged && _capture != null) Mixer.MicSuspended = true;
+        if (fading.Count > 0 || Mixer.MicSuspended) Thread.Sleep(Math.Clamp(latency * 2 + 50, 100, 600));
+
+        if (mainChanged) StopMain();
+        else if (micChanged) StopMic();
+        if (monitorChanged) StopMonitor();
+
+        // 2) start phase
+        try
+        {
+            using var en = new MMDeviceEnumerator();
+            if (mainChanged) StartMain(en, cfg, latency);
+            if (monitorChanged) StartMonitor(en, cfg, latency);
+            if (micChanged) StartMic(en, cfg.MicId);
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            State = EngineState.Error;
+        }
+        Mixer.MicSuspended = false;
+    }
+
+    /// <summary>Retries the streams that are missing or faulted (device unplugged, VB-CABLE just installed...).</summary>
+    public void Retry()
+    {
+        if (_cfg == null) return;
+        bool main = State == EngineState.NoOutputDevice || State == EngineState.Error;
+        bool mon = MonitorState == EngineState.NoOutputDevice || MonitorState == EngineState.Error;
+        if (main || mon) Apply(_cfg, main, mon);
+    }
+
+    void StartMain(MMDeviceEnumerator en, EngineConfig cfg, int latency)
+    {
         LastError = null;
         MicWarning = null;
         MicWarningDetail = null;
         OutputName = null;
-        MicName = null;
-        int latency = Math.Clamp(latencyMs, 10, 300);
+
+        MMDevice? dev = null;
+        if (string.IsNullOrEmpty(cfg.OutputId) || cfg.OutputId == "auto")
+            dev = FindCableRender(en);
+        else
+        {
+            try { dev = en.GetDevice(cfg.OutputId); } catch { dev = null; }
+        }
+
+        if (dev == null)
+        {
+            State = EngineState.NoOutputDevice;
+            return;
+        }
 
         try
         {
-            using var en = new MMDeviceEnumerator();
-
-            MMDevice? outDev = null;
-            if (string.IsNullOrEmpty(outId) || outId == "auto")
-                outDev = FindCableRender(en);
-            else
-            {
-                try { outDev = en.GetDevice(outId); } catch { outDev = null; }
-            }
-
-            if (outDev == null)
-            {
-                State = EngineState.NoOutputDevice;
-                return;
-            }
-
-            OutputName = outDev.FriendlyName;
-            _main = new OutputPipe(outDev, Mixer, latency); // pipe owns outDev
-            _main.Faulted += OnPipeFaulted;
+            OutputName = dev.FriendlyName;
+            _main = new OutputPipe(dev, Mixer, latency); // pipe owns dev
+            _main.Faulted += OnMainFaulted;
             _main.Start();
             State = EngineState.Running;
-
-            StartMic(en, micId);
         }
         catch (Exception ex)
         {
-            StopInternal();
+            StopMain();
             LastError = ex.Message;
             State = EngineState.Error;
         }
     }
 
+    void StartMonitor(MMDeviceEnumerator en, EngineConfig cfg, int latency)
+    {
+        MonitorError = null;
+        MonitorWarning = null;
+        MonitorName = null;
+
+        MMDevice? dev = null;
+        try
+        {
+            if (string.IsNullOrEmpty(cfg.MonitorId) || cfg.MonitorId == "default")
+            {
+                dev = en.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+                if (IsVirtualCable(dev.FriendlyName) || dev.ID == _main?.DeviceId)
+                {
+                    // Windows' default playback device is the cable (or the main output): use the first real device instead.
+                    dev.Dispose();
+                    dev = null;
+                    foreach (var d in en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+                    {
+                        if (dev == null && !IsVirtualCable(d.FriendlyName) && d.ID != _main?.DeviceId) dev = d;
+                        else d.Dispose();
+                    }
+                }
+            }
+            else
+            {
+                dev = en.GetDevice(cfg.MonitorId);
+                if (IsVirtualCable(dev.FriendlyName))
+                {
+                    MonitorWarning = "monitorIsCable";
+                    dev.Dispose();
+                    MonitorState = EngineState.Stopped;
+                    return;
+                }
+                if (dev.ID == _main?.DeviceId)
+                {
+                    dev.Dispose(); // same device as the virtual mic output: would play every sound twice
+                    MonitorState = EngineState.Stopped;
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            dev?.Dispose();
+            dev = null;
+        }
+
+        if (dev == null)
+        {
+            MonitorState = EngineState.NoOutputDevice;
+            return;
+        }
+
+        try
+        {
+            MonitorName = dev.FriendlyName;
+            _monitor = new OutputPipe(dev, MonitorMixer, latency);
+            _monitor.Faulted += OnMonitorFaulted;
+            _monitor.Start();
+            MonitorState = EngineState.Running;
+        }
+        catch (Exception ex)
+        {
+            StopMonitor();
+            MonitorError = ex.Message;
+            MonitorState = EngineState.Error;
+        }
+    }
+
     void StartMic(MMDeviceEnumerator en, string? micId)
     {
-        if (micId == "none") return;
+        MicName = null;
+        MicWarning = null;
+        MicWarningDetail = null;
+        if (micId == "none" || _main == null) return;
+
+        // The microphone is only ever sent to a virtual cable. Any other output device would play the user's own
+        // voice back on the speakers = feedback/echo.
+        if (!IsVirtualCable(OutputName ?? ""))
+        {
+            MicWarning = "micNeedsCable";
+            return;
+        }
+
         MMDevice? dev = null;
         try
         {
@@ -168,7 +318,7 @@ public sealed class AudioEngine : IDisposable
             var cap = new WasapiCapture(dev, true, 20);
             var buf = new BufferedWaveProvider(cap.WaveFormat)
             {
-                BufferDuration = TimeSpan.FromMilliseconds(400),
+                BufferDuration = TimeSpan.FromMilliseconds(500),
                 DiscardOnBufferOverflow = true,
                 ReadFully = true
             };
@@ -204,6 +354,8 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
+    // Stop* methods are called after the stream has already faded to silence.
+
     void StopMic()
     {
         Mixer.SetMic(null);
@@ -216,26 +368,48 @@ public sealed class AudioEngine : IDisposable
         }
         _micDevice?.Dispose();
         _micDevice = null;
+        MicName = null;
     }
 
-    void StopInternal()
+    void StopMain()
     {
         StopMic();
-        var main = _main;
+        var p = _main;
         _main = null;
-        if (main != null)
+        if (p != null)
         {
-            main.Faulted -= OnPipeFaulted;
-            main.Dispose();
+            p.Faulted -= OnMainFaulted;
+            p.Dispose();
         }
         Mixer.Clear();
         State = EngineState.Stopped;
+        OutputName = null;
     }
 
-    void OnPipeFaulted(string message)
+    void StopMonitor()
+    {
+        var p = _monitor;
+        _monitor = null;
+        if (p != null)
+        {
+            p.Faulted -= OnMonitorFaulted;
+            p.Dispose();
+        }
+        MonitorMixer.Clear();
+        MonitorState = EngineState.Stopped;
+        MonitorName = null;
+    }
+
+    void OnMainFaulted(string message)
     {
         LastError = message;
         State = EngineState.Error;
+    }
+
+    void OnMonitorFaulted(string message)
+    {
+        MonitorError = message;
+        MonitorState = EngineState.Error;
     }
 
     void OnCaptureStopped(object? sender, StoppedEventArgs e)
@@ -248,62 +422,46 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    // ---------- preview (headphones / default speakers) ----------
+    // ---------- playback ----------
 
+    /// <summary>Plays a sound on the virtual mic channel and (if enabled) on the speakers channel at the same time.</summary>
+    public void Play(Guid id, short[] data, float gain)
+    {
+        if (IsRunning) Mixer.Play(id, data, gain);
+        if (MonitorEnabled && MonitorRunning) MonitorMixer.Play(id, data, gain);
+    }
+
+    /// <summary>Speakers only. Never reaches the virtual microphone and never interferes with normal playback.</summary>
     public void Preview(Guid id, short[] data, float gain)
     {
-        if (_preview == null)
-        {
-            using var en = new MMDeviceEnumerator();
-            MMDevice? dev = null;
-            try
-            {
-                dev = en.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-                if (IsVirtualCable(dev.FriendlyName))
-                {
-                    dev.Dispose();
-                    dev = null;
-                    foreach (var d in en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
-                    {
-                        if (dev == null && !IsVirtualCable(d.FriendlyName)) dev = d;
-                        else d.Dispose();
-                    }
-                }
-            }
-            catch { dev?.Dispose(); dev = null; }
-            if (dev == null) throw new InvalidOperationException("No playback device available.");
-
-            _preview = new OutputPipe(dev, _previewMixer, 60);
-            _preview.Start();
-        }
-        _previewIdleTicks = 0;
-        _previewMixer.Clear();
-        _previewMixer.Play(id, data, gain);
+        if (!MonitorRunning) throw new InvalidOperationException("No speakers/headphones device available.");
+        MonitorMixer.Play(id, data, gain);
     }
 
-    public void StopPreview() => _previewMixer.StopAll();
-
-    /// <summary>Called every ~2 s: closes the preview device once it has been idle for a while.</summary>
-    public void Housekeeping()
+    public void StopAll()
     {
-        if (_preview == null) return;
-        if (_previewMixer.ActiveCount == 0)
-        {
-            if (++_previewIdleTicks >= 3)
-            {
-                _preview.Dispose();
-                _preview = null;
-                _previewIdleTicks = 0;
-            }
-        }
-        else _previewIdleTicks = 0;
+        Mixer.StopAll();
+        MonitorMixer.StopAll();
     }
+
+    public void SetSoundboardVolume(float v)
+    {
+        Mixer.SoundboardVolume = v;
+        MonitorMixer.SoundboardVolume = v;
+    }
+
+    /// <summary>Active (non-fading) voices per sound; the virtual-mic channel is the reference, the speakers channel when it is not running.</summary>
+    public int Snapshot(Dictionary<Guid, int> counts) =>
+        IsRunning ? Mixer.Snapshot(counts) : MonitorMixer.Snapshot(counts);
 
     public void Dispose()
     {
-        StopInternal();
-        _preview?.Dispose();
-        _preview = null;
+        var fading = 0;
+        if (_main != null && State == EngineState.Running) { Mixer.GateOpen = false; fading++; }
+        if (_monitor != null && MonitorState == EngineState.Running) { MonitorMixer.GateOpen = false; fading++; }
+        if (fading > 0) Thread.Sleep(Math.Clamp((_cfg?.LatencyMs ?? 40) * 2 + 50, 100, 600));
+        StopMain();
+        StopMonitor();
     }
 }
 
@@ -312,17 +470,21 @@ internal sealed class OutputPipe : IDisposable
 {
     readonly MMDevice _device;
     readonly WasapiOut _out;
+    readonly MixerProvider _mixer;
     bool _disposed;
 
+    public string DeviceId { get; }
     public event Action<string>? Faulted;
 
-    public OutputPipe(MMDevice device, ISampleProvider source, int latencyMs)
+    public OutputPipe(MMDevice device, MixerProvider mixer, int latencyMs)
     {
         _device = device;
+        _mixer = mixer;
+        DeviceId = device.ID;
         try
         {
             var mix = device.AudioClient.MixFormat;
-            ISampleProvider chain = source;
+            ISampleProvider chain = mixer;
             if (mix.SampleRate != MixerProvider.SampleRate)
                 chain = new WdlResamplingSampleProvider(chain, mix.SampleRate);
 
@@ -352,11 +514,17 @@ internal sealed class OutputPipe : IDisposable
         }
     }
 
-    public void Start() => _out.Play();
+    /// <summary>Starts the device and fades the stream in from silence.</summary>
+    public void Start()
+    {
+        _out.Play();
+        _mixer.GateOpen = true;
+    }
 
     public void Dispose()
     {
         _disposed = true;
+        _mixer.GateOpen = false; // callers fade first; this is only a safety net
         try { _out.Stop(); } catch { }
         try { _out.Dispose(); } catch { }
         try { _device.Dispose(); } catch { }

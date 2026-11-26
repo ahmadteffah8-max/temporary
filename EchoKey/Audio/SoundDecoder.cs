@@ -83,6 +83,23 @@ public static class SoundDecoder
 
         if ((total & 1) != 0) total--;
         if (total != result.Length) Array.Resize(ref result, total);
+        ApplyEdgeFades(result);
         return result;
+    }
+
+    /// <summary>3 ms linear fade-in/out: a file that starts or ends away from zero would otherwise click on every press.</summary>
+    public static void ApplyEdgeFades(short[] pcm)
+    {
+        int frames = pcm.Length / 2;
+        int n = Math.Min(MixerProvider.SampleRate * 3 / 1000, frames / 2);
+        for (int i = 0; i < n; i++)
+        {
+            float g = (float)i / n;
+            int a = i * 2, b = (frames - 1 - i) * 2;
+            pcm[a] = (short)(pcm[a] * g);
+            pcm[a + 1] = (short)(pcm[a + 1] * g);
+            pcm[b] = (short)(pcm[b] * g);
+            pcm[b + 1] = (short)(pcm[b + 1] * g);
+        }
     }
 }
