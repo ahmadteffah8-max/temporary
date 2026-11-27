@@ -465,6 +465,84 @@ public sealed class AudioEngine : IDisposable
     }
 }
 
+/// <summary>
+/// Converts the float mixer output to the exact format of the audio device (32-bit float, or 16/24/32-bit PCM),
+/// so WASAPI never has to guess or run its own converter. Always returns a full buffer (padded with silence).
+/// </summary>
+internal sealed class DeviceFormatProvider : IWaveProvider
+{
+    readonly ISampleProvider _src;
+    readonly bool _float;
+    readonly int _bytes;
+    float[] _buf = new float[4096];
+
+    public WaveFormat WaveFormat { get; }
+
+    DeviceFormatProvider(ISampleProvider src, WaveFormat format, bool isFloat, int bytes)
+    {
+        _src = src;
+        WaveFormat = format;
+        _float = isFloat;
+        _bytes = bytes;
+    }
+
+    /// <summary>Returns null when the device format is not one we can write directly.</summary>
+    public static DeviceFormatProvider? TryCreate(ISampleProvider src, WaveFormat mix)
+    {
+        WaveFormat std = mix is WaveFormatExtensible ext ? ext.ToStandardWaveFormat() : mix;
+        bool isFloat = std.Encoding == WaveFormatEncoding.IeeeFloat;
+        bool isPcm = std.Encoding == WaveFormatEncoding.Pcm;
+        int bits = mix.BitsPerSample;
+
+        if (isFloat) { if (bits != 32) return null; }
+        else if (!(isPcm && (bits == 16 || bits == 24 || bits == 32))) return null;
+
+        if (src.WaveFormat.Channels != mix.Channels || src.WaveFormat.SampleRate != mix.SampleRate) return null;
+        return new DeviceFormatProvider(src, mix, isFloat, bits / 8);
+    }
+
+    public int Read(byte[] buffer, int offset, int count)
+    {
+        int samples = count / _bytes;
+        if (_buf.Length < samples) _buf = new float[samples];
+
+        int n = _src.Read(_buf, 0, samples);
+        if (n < samples) Array.Clear(_buf, Math.Max(0, n), samples - Math.Max(0, n));
+
+        int o = offset;
+        for (int i = 0; i < samples; i++)
+        {
+            float f = _buf[i];
+            if (float.IsNaN(f)) f = 0f;
+            else if (f > 1f) f = 1f;
+            else if (f < -1f) f = -1f;
+
+            if (_float)
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(buffer.AsSpan(o, 4), f);
+            }
+            else if (_bytes == 2)
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(buffer.AsSpan(o, 2), (short)Math.Round(f * 32767f));
+            }
+            else if (_bytes == 3)
+            {
+                int v = (int)Math.Round(f * 8388607f);
+                buffer[o] = (byte)v;
+                buffer[o + 1] = (byte)(v >> 8);
+                buffer[o + 2] = (byte)(v >> 16);
+            }
+            else
+            {
+                int v = (int)Math.Clamp(Math.Round(f * 2147483647.0), int.MinValue, int.MaxValue);
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(o, 4), v);
+            }
+            o += _bytes;
+        }
+        return samples * _bytes;
+    }
+}
+
 /// <summary>A WASAPI shared-mode output fed by a 48 kHz stereo float mixer (converted to the device format).</summary>
 internal sealed class OutputPipe : IDisposable
 {
@@ -500,8 +578,13 @@ internal sealed class OutputPipe : IDisposable
                 chain = mux;
             }
 
+            // Feed the device in EXACTLY its own format (same rate, channels, bit depth). If the format differs from
+            // what the Windows audio engine expects, NAudio silently falls back to a DMO converter, and a wrong
+            // conversion is heard as loud static instead of the sound. Unknown formats keep the old float path.
+            IWaveProvider wave = (IWaveProvider?)DeviceFormatProvider.TryCreate(chain, mix) ?? new SampleToWaveProvider(chain);
+
             _out = new WasapiOut(device, AudioClientShareMode.Shared, true, latencyMs);
-            _out.Init(new SampleToWaveProvider(chain));
+            _out.Init(wave);
             _out.PlaybackStopped += (_, e) =>
             {
                 if (!_disposed) Faulted?.Invoke(e.Exception?.Message ?? "Output stopped unexpectedly.");
